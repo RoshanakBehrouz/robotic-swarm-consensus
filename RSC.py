@@ -1,271 +1,294 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.integrate import odeint
-import random
 from collections import defaultdict
+import random
 
-class SwarmConsensusModel:
-    """
-    Cross-inhibition model for robotic swarm consensus using Chemical Reaction Networks (CRN).
-    
-    Reactions:
-    X + Y -> X + U
-    X + Y -> U + Y  
-    X + U -> X + X
-    Y + U -> Y + Y
-    X + ZY -> U + ZY
-    U + ZY -> Y + ZY
-    Y + ZX -> U + ZX
-    U + ZX -> X + ZX
-    """
-    
-    def __init__(self, rate_constants=None):
-        """Initialize the model with reaction rate constants."""
-        if rate_constants is None:
-            # Default rate constants for all reactions
-            self.rate_constants = {
-                'k1': 1.0,  # X + Y -> X + U
-                'k2': 1.0,  # X + Y -> U + Y
-                'k3': 1.0,  # X + U -> X + X
-                'k4': 1.0,  # Y + U -> Y + Y
-                'k5': 1.0,  # X + ZY -> U + ZY
-                'k6': 1.0,  # U + ZY -> Y + ZY
-                'k7': 1.0,  # Y + ZX -> U + ZX
-                'k8': 1.0,  # U + ZX -> X + ZX
-            }
-        else:
-            self.rate_constants = rate_constants
-    
-    def reaction_rates(self, state, t):
+class CrossInhibitionModel:
+    def __init__(self, N=100, ZX=10, ZY=10, X0=40, Y0=40, qX=1.0, qY=1.0):
         """
-        Calculate the reaction rates based on current state.
-        state = [X, Y, U, ZX, ZY]
-        """
-        X, Y, U, ZX, ZY = state
-        
-        # Ensure non-negative concentrations
-        X, Y, U, ZX, ZY = max(0, X), max(0, Y), max(0, U), max(0, ZX), max(0, ZY)
-        
-        # Reaction rates
-        r1 = self.rate_constants['k1'] * X * Y  # X + Y -> X + U
-        r2 = self.rate_constants['k2'] * X * Y  # X + Y -> U + Y
-        r3 = self.rate_constants['k3'] * X * U  # X + U -> X + X
-        r4 = self.rate_constants['k4'] * Y * U  # Y + U -> Y + Y
-        r5 = self.rate_constants['k5'] * X * ZY  # X + ZY -> U + ZY
-        r6 = self.rate_constants['k6'] * U * ZY  # U + ZY -> Y + ZY
-        r7 = self.rate_constants['k7'] * Y * ZX  # Y + ZX -> U + ZX
-        r8 = self.rate_constants['k8'] * U * ZX  # U + ZX -> X + ZX
-        
-        # Differential equations
-        dX_dt = -r1 - r2 + r3 - r5 + r8
-        dY_dt = -r1 - r2 + r4 - r7 + r6
-        dU_dt = r1 + r2 - r3 - r4 + r5 - r6 + r7 - r8
-        dZX_dt = 0  # ZX is constant (zealot)
-        dZY_dt = 0  # ZY is constant (zealot)
-        
-        return [dX_dt, dY_dt, dU_dt, dZX_dt, dZY_dt]
-    
-    def simulate(self, initial_state, time_points):
-        """Simulate the system dynamics."""
-        solution = odeint(self.reaction_rates, initial_state, time_points)
-        return solution
-    
-    def check_consensus(self, state, m, d):
-        """
-        Check if consensus is achieved based on the given formula.
-        F = (|X + ZX > minm ∧ |X - Y > d|) ∨ |Y + ZY > m ∧ |Y - X > d||)
-        """
-        X, Y, U, ZX, ZY = state
-        
-        # Calculate total agents for each decision
-        total_X = X + ZX
-        total_Y = Y + ZY
-        
-        # Check consensus conditions
-        condition1 = (total_X > m) and (abs(X - Y) > d)
-        condition2 = (total_Y > m) and (abs(Y - X) > d)
-        
-        return condition1 or condition2
-    
-    def find_consensus_probability(self, N, ZX, ZY, m, d, t, h, num_simulations=1000):
-        """
-        Find the probability that the system reaches consensus.
+        Initialize the cross-inhibition model.
         
         Parameters:
-        N: Total number of agents
-        ZX, ZY: Number of zealots for X and Y
-        m: Minimum majority threshold
-        d: Minimum difference threshold
-        t: Time threshold
-        h: Time units to maintain consensus
-        num_simulations: Number of Monte Carlo simulations
+        - N: Total number of agents
+        - ZX: Number of X zealots
+        - ZY: Number of Y zealots
+        - X0: Initial number of X agents
+        - Y0: Initial number of Y agents
+        - qX: Rate parameter for X reactions
+        - qY: Rate parameter for Y reactions
         """
-        consensus_count = 0
+        # Validate initial conditions
+        assert X0 + Y0 + ZX + ZY <= N, "Initial conditions exceed total agents"
         
-        for _ in range(num_simulations):
-            # Initialize with random distribution of remaining agents
-            remaining_agents = N - ZX - ZY
-            X_initial = random.randint(0, remaining_agents)
-            Y_initial = remaining_agents - X_initial
-            U_initial = 0
-            
-            initial_state = [X_initial, Y_initial, U_initial, ZX, ZY]
-            
-            # Simulate for time t + h
-            time_points = np.linspace(0, t + h, int((t + h) * 10))
-            solution = self.simulate(initial_state, time_points)
-            
-            # Check if consensus is maintained for the last h time units
-            consensus_maintained = True
-            start_check_idx = int(t * 10)  # Start checking from time t
-            
-            for i in range(start_check_idx, len(solution)):
-                if not self.check_consensus(solution[i], m, d):
-                    consensus_maintained = False
-                    break
-            
-            if consensus_maintained:
-                consensus_count += 1
+        self.N = N
+        self.U0 = N - (X0 + Y0 + ZX + ZY)  # Calculate initial U agents
         
-        return consensus_count / num_simulations
+        # Current state
+        self.state = {
+            'X': X0,
+            'Y': Y0,
+            'U': self.U0,
+            'ZX': ZX,
+            'ZY': ZY
+        }
+        
+        # Rate parameters
+        self.qX = qX
+        self.qY = qY
+        
+        # Time tracking
+        self.time = 0.0
+        self.history = []
+        self.record_state()
+        
+    def record_state(self):
+        """Record the current state and time."""
+        self.history.append({
+            'time': self.time,
+            'X': self.state['X'],
+            'Y': self.state['Y'],
+            'U': self.state['U'],
+            'ZX': self.state['ZX'],
+            'ZY': self.state['ZY']
+        })
+    
+    def calculate_propensities(self):
+        """Calculate propensities for all reactions."""
+        X, Y, U, ZX, ZY = self.state['X'], self.state['Y'], self.state['U'], self.state['ZX'], self.state['ZY']
+        
+        propensities = {
+            'r1': self.qX * X * Y,      # X + Y → X + U
+            'r2': self.qY * X * Y,      # X + Y → U + Y
+            'r3': self.qX * X * U,      # X + U → X + X
+            'r4': self.qY * Y * U,      # Y + U → Y + Y
+            'r5': self.qY * X * ZY,     # X + ZY → U + ZY
+            'r6': self.qY * U * ZY,     # U + ZY → Y + ZY
+            'r7': self.qX * Y * ZX,     # Y + ZX → U + ZX
+            'r8': self.qX * U * ZX      # U + ZX → X + ZX
+        }
+        
+        return propensities
+    
+    def execute_reaction(self, reaction):
+        """Update state based on the selected reaction."""
+        if reaction == 'r1':   # X + Y → X + U
+            self.state['Y'] -= 1
+            self.state['U'] += 1
+        elif reaction == 'r2': # X + Y → U + Y
+            self.state['X'] -= 1
+            self.state['U'] += 1
+        elif reaction == 'r3': # X + U → X + X
+            self.state['U'] -= 1
+            self.state['X'] += 1
+        elif reaction == 'r4': # Y + U → Y + Y
+            self.state['U'] -= 1
+            self.state['Y'] += 1
+        elif reaction == 'r5': # X + ZY → U + ZY
+            self.state['X'] -= 1
+            self.state['U'] += 1
+        elif reaction == 'r6': # U + ZY → Y + ZY
+            self.state['U'] -= 1
+            self.state['Y'] += 1
+        elif reaction == 'r7': # Y + ZX → U + ZX
+            self.state['Y'] -= 1
+            self.state['U'] += 1
+        elif reaction == 'r8': # U + ZX → X + ZX
+            self.state['U'] -= 1
+            self.state['X'] += 1
+    
+    def step(self):
+        """Execute one step of the Gillespie algorithm."""
+        # Calculate all reaction propensities
+        propensities = self.calculate_propensities()
+        total_propensity = sum(propensities.values())
+        
+        if total_propensity <= 0:
+            return False  # No more reactions possible
+        
+        # Determine time until next reaction
+        tau = np.random.exponential(1.0 / total_propensity)
+        self.time += tau
+        
+        # Select which reaction occurs
+        r = random.random() * total_propensity
+        cumulative = 0.0
+        for reaction, propensity in propensities.items():
+            cumulative += propensity
+            if r <= cumulative:
+                self.execute_reaction(reaction)
+                break
+        
+        # Record the new state
+        self.record_state()
+        return True
+    
+    def simulate(self, max_time):
+        """Run simulation until max_time is reached."""
+        while self.time < max_time and self.step():
+            pass
+    
+    def check_consensus(self, t, h, m, d):
+        """
+        Check if consensus was reached according to the specified property.
+        
+        Parameters:
+        - t: Time before which consensus must be reached
+        - h: Duration consensus must be maintained
+        - m: Majority parameter (percentage)
+        - d: Minimum difference between groups
+        
+        Returns:
+        - 1 if X consensus reached
+        - -1 if Y consensus reached
+        - 0 if no consensus reached
+        """
+        min_m = (m / 100) * self.N
+        consensus_start = None
+        current_consensus = 0
+        
+        # Find all time points before t
+        time_points = [entry for entry in self.history if entry['time'] <= t]
+        
+        for entry in time_points:
+            X_total = entry['X'] + entry['ZX']
+            Y_total = entry['Y'] + entry['ZY']
+            
+            # Check for X consensus
+            if X_total > min_m and (X_total - Y_total) > d:
+                if current_consensus != 1:
+                    consensus_start = entry['time']
+                    current_consensus = 1
+            # Check for Y consensus
+            elif Y_total > min_m and (Y_total - X_total) > d:
+                if current_consensus != -1:
+                    consensus_start = entry['time']
+                    current_consensus = -1
+            else:
+                # Consensus lost
+                consensus_start = None
+                current_consensus = 0
+            
+            # Check if consensus has been maintained for h time units
+            if consensus_start is not None and (entry['time'] - consensus_start) >= h:
+                return current_consensus
+        
+        return 0
 
-def main():
-    """Main function to run the analysis as specified in the objectives."""
+def run_experiments(num_simulations=100, N=100, ZX=10, ZY=10, X0=40, Y0=40, 
+                    t=35, h=40, m=50, d=10):
+    """Run multiple simulations to estimate consensus probability."""
+    results = {'X': 0, 'Y': 0, 'none': 0}
     
-    # Create the model
-    model = SwarmConsensusModel()
+    for _ in range(num_simulations):
+        model = CrossInhibitionModel(N=N, ZX=ZX, ZY=ZY, X0=X0, Y0=Y0)
+        model.simulate(max_time=t + h)  # Simulate slightly longer than needed
+        
+        consensus = model.check_consensus(t, h, m, d)
+        
+        if consensus == 1:
+            results['X'] += 1
+        elif consensus == -1:
+            results['Y'] += 1
+        else:
+            results['none'] += 1
     
-    print("Robotic Swarm Consensus Analysis")
-    print("=" * 50)
-    
-    # Objective 1: Find probability with specific parameters
-    print("\n1. Consensus Probability with Given Parameters:")
-    print("   m=50, d=10, t=35, h=40, N=100, ZX=ZY=10")
-    print("   Initial: 40 agents type X, 40 agents type Y")
-    
-    N = 100
-    ZX = ZY = 10
-    m = 50
-    d = 10
-    t = 35
-    h = 40
-    
-    prob = model.find_consensus_probability(N, ZX, ZY, m, d, t, h)
-    print(f"   Consensus Probability: {prob:.3f}")
-    
-    # Objective 2: Explore varying ZX and ZY values
-    print("\n2. Exploring Different Zealot Distributions:")
-    zealot_values = [5, 10, 15, 20, 25]
-    zealot_probs = []
-    
-    for zx in zealot_values:
-        for zy in zealot_values:
-            if zx + zy < N:  # Ensure valid configuration
-                prob = model.find_consensus_probability(N, zx, zy, m, d, t, h, num_simulations=500)
-                zealot_probs.append((zx, zy, prob))
-                print(f"   ZX={zx}, ZY={zy}: Probability = {prob:.3f}")
-    
-    # Objective 3: Explore group size effects
-    print("\n3. Group Size Effects on Consensus:")
-    group_sizes = [50, 100, 150, 200, 250]
-    size_probs = []
-    
-    for n in group_sizes:
-        # Keep zealot ratio constant
-        zx = zy = int(n * 0.1)  # 10% zealots each
-        prob = model.find_consensus_probability(n, zx, zy, int(n*0.5), d, t, h, num_simulations=500)
-        size_probs.append((n, prob))
-        print(f"   N={n}: Probability = {prob:.3f}")
-    
-    # Visualization
-    create_visualizations(zealot_probs, size_probs, model)
+    return {k: v / num_simulations for k, v in results.items()}
 
-def create_visualizations(zealot_probs, size_probs, model):
-    """Create visualizations of the results."""
+def vary_zealots(max_zealots=40, num_simulations=100, N=100, X0=40, Y0=40, 
+                 t=35, h=40, m=50, d=10):
+    """Explore how zealot count affects consensus probability."""
+    zealot_counts = range(0, max_zealots + 1, 2)
+    results = []
     
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-    
-    # 1. Sample trajectory
-    initial_state = [40, 40, 0, 10, 10]
-    time_points = np.linspace(0, 100, 1000)
-    solution = model.simulate(initial_state, time_points)
-    
-    ax1.plot(time_points, solution[:, 0], label='X agents', linewidth=2)
-    ax1.plot(time_points, solution[:, 1], label='Y agents', linewidth=2)
-    ax1.plot(time_points, solution[:, 2], label='U agents', linewidth=2)
-    ax1.axhline(y=10, color='red', linestyle='--', alpha=0.7, label='ZX zealots')
-    ax1.axhline(y=10, color='blue', linestyle='--', alpha=0.7, label='ZY zealots')
-    ax1.set_xlabel('Time')
-    ax1.set_ylabel('Number of Agents')
-    ax1.set_title('Sample Trajectory')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. Zealot distribution heatmap
-    if zealot_probs:
-        zealot_values = sorted(set([zx for zx, zy, prob in zealot_probs]))
-        prob_matrix = np.zeros((len(zealot_values), len(zealot_values)))
+    for z in zealot_counts:
+        ZX = ZY = z
+        # Adjust initial X and Y counts to maintain total agents
+        adjusted_X0 = X0 - (z - 10) if z > 10 else X0
+        adjusted_Y0 = Y0 - (z - 10) if z > 10 else Y0
         
-        for zx, zy, prob in zealot_probs:
-            i = zealot_values.index(zx)
-            j = zealot_values.index(zy)
-            prob_matrix[i, j] = prob
+        # Ensure we don't have negative counts
+        adjusted_X0 = max(0, adjusted_X0)
+        adjusted_Y0 = max(0, adjusted_Y0)
         
-        im = ax2.imshow(prob_matrix, cmap='viridis', aspect='auto')
-        ax2.set_xticks(range(len(zealot_values)))
-        ax2.set_yticks(range(len(zealot_values)))
-        ax2.set_xticklabels(zealot_values)
-        ax2.set_yticklabels(zealot_values)
-        ax2.set_xlabel('ZY (Y Zealots)')
-        ax2.set_ylabel('ZX (X Zealots)')
-        ax2.set_title('Consensus Probability vs Zealot Distribution')
-        plt.colorbar(im, ax=ax2)
+        probs = run_experiments(num_simulations=num_simulations, N=N, 
+                               ZX=ZX, ZY=ZY, X0=adjusted_X0, Y0=adjusted_Y0,
+                               t=t, h=h, m=m, d=d)
+        results.append((z, probs))
     
-    # 3. Group size effect
-    if size_probs:
-        sizes, probs = zip(*size_probs)
-        ax3.plot(sizes, probs, 'bo-', linewidth=2, markersize=8)
-        ax3.set_xlabel('Group Size (N)')
-        ax3.set_ylabel('Consensus Probability')
-        ax3.set_title('Effect of Group Size on Consensus')
-        ax3.grid(True, alpha=0.3)
+    return results
+
+def vary_group_size(group_sizes, num_simulations=100, zealot_ratio=0.1, X_ratio=0.4, 
+                    Y_ratio=0.4, t=35, h=40, m=50, d=10):
+    """Explore how group size affects consensus probability."""
+    results = []
     
-    # 4. Phase space trajectory
-    ax4.plot(solution[:, 0], solution[:, 1], linewidth=2)
-    ax4.scatter(solution[0, 0], solution[0, 1], color='green', s=100, label='Start', zorder=5)
-    ax4.scatter(solution[-1, 0], solution[-1, 1], color='red', s=100, label='End', zorder=5)
-    ax4.set_xlabel('X Agents')
-    ax4.set_ylabel('Y Agents')
-    ax4.set_title('Phase Space Trajectory (X vs Y)')
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
+    for N in group_sizes:
+        ZX = ZY = int(N * zealot_ratio / 2)
+        X0 = int(N * X_ratio)
+        Y0 = int(N * Y_ratio)
+        
+        probs = run_experiments(num_simulations=num_simulations, N=N, 
+                              ZX=ZX, ZY=ZY, X0=X0, Y0=Y0,
+                              t=t, h=h, m=m, d=d)
+        results.append((N, probs))
     
-    plt.tight_layout()
+    return results
+
+def plot_zealot_results(results):
+    """Plot results from zealot variation experiment."""
+    z_counts = [r[0] for r in results]
+    x_probs = [r[1]['X'] for r in results]
+    y_probs = [r[1]['Y'] for r in results]
+    none_probs = [r[1]['none'] for r in results]
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(z_counts, x_probs, 'b-', label='X consensus')
+    plt.plot(z_counts, y_probs, 'r-', label='Y consensus')
+    plt.plot(z_counts, none_probs, 'g-', label='No consensus')
+    
+    plt.xlabel('Number of Zealots (ZX = ZY)')
+    plt.ylabel('Probability')
+    plt.title('Effect of Zealot Count on Consensus Probability')
+    plt.legend()
+    plt.grid(True)
     plt.show()
 
-def demonstrate_consensus_formula():
-    """Demonstrate the consensus formula with examples."""
-    model = SwarmConsensusModel()
+def plot_group_size_results(results):
+    """Plot results from group size variation experiment."""
+    sizes = [r[0] for r in results]
+    x_probs = [r[1]['X'] for r in results]
+    y_probs = [r[1]['Y'] for r in results]
+    none_probs = [r[1]['none'] for r in results]
     
-    print("\nConsensus Formula Demonstration:")
-    print("F = (|X + ZX > m ∧ |X - Y > d|) ∨ |Y + ZY > m ∧ |Y - X > d||)")
-    print("=" * 60)
+    plt.figure(figsize=(10, 6))
+    plt.plot(sizes, x_probs, 'b-', label='X consensus')
+    plt.plot(sizes, y_probs, 'r-', label='Y consensus')
+    plt.plot(sizes, none_probs, 'g-', label='No consensus')
     
-    test_cases = [
-        ([30, 20, 0, 10, 10], 50, 10, "No consensus - neither group dominates"),
-        ([45, 15, 0, 10, 10], 50, 10, "X consensus - X+ZX=55>50, |X-Y|=30>10"),
-        ([15, 45, 0, 10, 10], 50, 10, "Y consensus - Y+ZY=55>50, |Y-X|=30>10"),
-        ([35, 35, 0, 10, 10], 50, 10, "No consensus - difference too small"),
-    ]
-    
-    for state, m, d, description in test_cases:
-        consensus = model.check_consensus(state, m, d)
-        X, Y, U, ZX, ZY = state
-        print(f"State: X={X}, Y={Y}, U={U}, ZX={ZX}, ZY={ZY}")
-        print(f"X+ZX={X+ZX}, Y+ZY={Y+ZY}, |X-Y|={abs(X-Y)}")
-        print(f"Consensus: {consensus} - {description}")
-        print()
+    plt.xlabel('Group Size (N)')
+    plt.ylabel('Probability')
+    plt.title('Effect of Group Size on Consensus Probability')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
+# Main analysis
 if __name__ == "__main__":
-    main()
-    demonstrate_consensus_formula()
+    # Base case from the problem statement
+    print("Running base case simulations...")
+    base_results = run_experiments(num_simulations=500)
+    print("\nBase case results (m=50, d=10, t=35, h=40, N=100, ZX=ZY=10):")
+    print(f"X consensus probability: {base_results['X']:.3f}")
+    print(f"Y consensus probability: {base_results['Y']:.3f}")
+    print(f"No consensus probability: {base_results['none']:.3f}")
+    
+    # Vary zealot counts
+    print("\nRunning zealot variation experiments...")
+    zealot_results = vary_zealots(max_zealots=40, num_simulations=200)
+    plot_zealot_results(zealot_results)
+    
+    # Vary group size
+    print("\nRunning group size variation experiments...")
+    group_sizes = range(20, 501, 20)
+    group_results = vary_group_size(group_sizes, num_simulations=200)
+    plot_group_size_results(group_results)
